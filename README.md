@@ -99,7 +99,8 @@ must otherwise match; nested channels can be given as `Root/Sub`).
    non-recording `FBI-BOT-scout` watches the server and starts one worker
    (`FBI-BOT`, `FBI-BOT-2`, …) per busy channel, retiring each after
    `swarm_idle_timeout` (60s) of quiet. Workers never count each other as
-   occupants.
+   occupants, and step out to Root (then disconnect) as soon as their
+   channel drops below `min_users` past `stop_delay` — no loitering.
 2. Each worker sits in its own channel and polls occupancy every
    `poll_interval` seconds.
 3. When its channel reaches `min_users` (2 real users, bot excluded), it

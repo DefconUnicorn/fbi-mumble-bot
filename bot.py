@@ -369,6 +369,7 @@ class FbiBot:
         )
         self._stop = threading.Event()
         self._below_since = None
+        self._quiet_since = None
         self._my_session = None
 
     # -- mumble plumbing ------------------------------------------------
@@ -723,6 +724,7 @@ class FbiBot:
 
         if self.record_enabled and here >= self.min_users:
             self._below_since = None
+            self._quiet_since = None
             if not self.recorder.active:
                 self.recorder.start(my_name)
         else:
@@ -732,18 +734,40 @@ class FbiBot:
                 elif time.time() - self._below_since >= self.stop_delay:
                     self.recorder.stop()
                     self._below_since = None
-                    # drift back to idle channel if configured
-                    if self.idle_channel:
-                        cur = self._my_channel_obj()
-                        cur_name = self._channel_name_of(cur) if cur else ""
-                        if cur_name != self.idle_channel:
-                            idle = self._find_channel(self.idle_channel)
-                            if idle is not None:
-                                try:
-                                    idle.move_in()
-                                    log.warning("Back to idle channel '%s'", self.idle_channel)
-                                except Exception:  # noqa: BLE001
-                                    pass
+                    self._leave_quiet_channel()
+                    if self.mode == "swarm" and self.record_enabled:
+                        self.stop()  # retire promptly; supervisor respawns if refilled
+            elif (self.mode == "swarm" and self.record_enabled
+                    and here < self.min_users):
+                # Joined but nothing to record (channel emptied around the
+                # join): grace period, then step out and retire.
+                if self._quiet_since is None:
+                    self._quiet_since = time.time()
+                elif time.time() - self._quiet_since >= self.stop_delay:
+                    self._leave_quiet_channel()
+                    self.stop()
+
+    def _leave_quiet_channel(self):
+        """Step out of a sub-threshold channel: fixed/roam drift back to the
+        idle channel, swarm workers step out to Root (then retire)."""
+        try:
+            target, want = None, ""
+            if self.mode == "swarm":
+                if self._my_channel_id() != 0:
+                    target = self.mumble.channels[0]
+                    want = "Root"
+            elif self.idle_channel:
+                cur = self._my_channel_obj()
+                cur_name = self._channel_name_of(cur) if cur else ""
+                if cur_name != self.idle_channel:
+                    target = self._find_channel(self.idle_channel)
+                    want = self.idle_channel
+            if target is not None:
+                target.move_in()
+                log.warning("[%s] Leaving quiet channel for '%s'",
+                            self.label, want)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _is_ignored(self, name):
         return isinstance(name, str) and name.strip().lower() in self._ignore_names
@@ -892,6 +916,16 @@ class Swarm:
     def _tick(self):
         snap = self._snapshot_fn() if self._snapshot_fn else self._snapshot()
         now = time.time()
+        # drop workers that retired themselves (quiet channel -> stepped out)
+        for cid in list(self.workers):
+            try:
+                alive = self.workers[cid]["thread"].is_alive()
+            except Exception:  # noqa: BLE001
+                alive = False
+            if not alive:
+                with self.lock:
+                    self.used_names.discard(self.workers[cid]["username"])
+                del self.workers[cid]
         for cid, (nm, n) in snap.items():
             if nm.lower() in self._ignore_names:
                 continue  # e.g. AFK lobby
