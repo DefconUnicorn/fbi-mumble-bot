@@ -1,5 +1,6 @@
 # FBI-BOT — headless Mumble recorder (TrueNAS / Docker)
-FROM python:3.12-slim
+# Pinned to 3.11: pymumble 1.6.1 calls ssl.wrap_socket(), removed in 3.12.
+FROM python:3.11-slim
 
 # libopus0 = voice decode (pymumble), ffmpeg = 128k OGG encode
 # build-essential = protobuf may need a source build on newer Pythons

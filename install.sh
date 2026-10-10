@@ -24,7 +24,26 @@ echo "==> Installing OS packages (libopus, ffmpeg)..."
 apt-get update
 # build-essential + python3-dev: protobuf may need a source build on newer
 # Pythons (no 3.20.x wheel); libopus-dev for good measure alongside libopus0.
-apt-get install -y python3 python3-venv python3-pip python3-dev build-essential libopus0 libopus-dev ffmpeg
+apt-get install -y python3 python3-venv python3-pip python3-dev build-essential libopus0 libopus-dev ffmpeg software-properties-common
+
+# pymumble 1.6.1 calls ssl.wrap_socket(), removed in Python 3.12 — it needs
+# Python <= 3.11. Prefer python3.11, else take python3 if it is <= 3.11,
+# else pull 3.11 from deadsnakes.
+pick_python() {
+  if command -v python3.11 >/dev/null 2>&1; then echo python3.11; return 0; fi
+  local v
+  v="$(python3 -c 'import sys; print(sys.version_info.major * 100 + sys.version_info.minor)' 2>/dev/null || echo 999)"
+  if [ "$v" -le 311 ]; then echo python3; return 0; fi
+  return 1
+}
+if ! PYBIN="$(pick_python)"; then
+  echo "==> Default python3 is too new for pymumble 1.6.1 (needs <= 3.11); installing python3.11..."
+  add-apt-repository -y ppa:deadsnakes/ppa
+  apt-get update
+  apt-get install -y python3.11 python3.11-venv
+  PYBIN=python3.11
+fi
+echo "==> Using $PYBIN ($("$PYBIN" --version))"
 
 echo "==> Creating user: $APP_USER"
 id "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
@@ -37,7 +56,10 @@ touch "$APP_DIR/__keep__" 2>/dev/null || true
 rm -f "$APP_DIR/__keep__"
 
 echo "==> Creating venv + pip install"
-python3 -m venv "$APP_DIR/venv"
+# Drop any venv built by an older run (e.g. one made with an unsuitable
+# interpreter) so the pinned $PYBIN below always takes effect.
+rm -rf "$APP_DIR/venv"
+"$PYBIN" -m venv "$APP_DIR/venv"
 "$APP_DIR/venv/bin/pip" install --upgrade pip
 # pymumble 1.6.1's sdist carries a stale protobuf==3.12.2 pin that breaks pip
 # resolution (upstream itself uses protobuf 3.20.3), so install it ignoring

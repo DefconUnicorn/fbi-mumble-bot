@@ -17,6 +17,9 @@ records to **128 kbps OGG** whenever **2 or more real users** share its channe
 
 ## Quick start (Ubuntu 22.04 / 24.04)
 
+Requires Python ≤ 3.11 (pymumble 1.6.1 uses `ssl.wrap_socket`, removed in
+3.12 — `install.sh` picks `python3.11` automatically, via deadsnakes if needed).
+
 ```bash
 git clone <this> /opt/fbi-mumble-bot   # or scp the folder up
 cd /opt/fbi-mumble-bot
