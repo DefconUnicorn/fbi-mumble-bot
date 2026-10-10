@@ -1,0 +1,34 @@
+name: Publish image
+
+# Builds the Docker image and pushes it to GHCR, so TrueNAS can
+# install it via "Apps > Install via YAML" (which cannot build:).
+# Triggers on every published GitHub Release (tagged :<version> + :latest)
+# or manually via Actions > Publish image > Run workflow (tagged :master).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/defconunicorn/fbi-mumble-bot:latest
+            ghcr.io/defconunicorn/fbi-mumble-bot:${{ github.ref_name }}
