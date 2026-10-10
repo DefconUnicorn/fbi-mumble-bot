@@ -1,0 +1,4 @@
+# Pinned working set (Ubuntu 22.04 / 24.04, Python 3.10+)
+pymumble==1.6.1
+protobuf==3.20.3
+opuslib==3.0.1

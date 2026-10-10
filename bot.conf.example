@@ -1,0 +1,69 @@
+# FBI-BOT configuration
+# Copy to bot.conf and edit:  cp bot.conf.example bot.conf
+# Then run:  python3 bot.py -c bot.conf
+
+[mumble]
+# Server address / port
+server = 127.0.0.1
+port = 64738
+
+# Name visible in the channel (as requested)
+username = FBI-BOT
+
+# Server password (blank if none)
+password =
+
+# Channel access tokens, comma-separated (blank if none)
+# tokens = secret1, secret2
+
+# Channels to record. Comma- or newline-separated, exact names.
+# ONE SERVICE covers them ALL simultaneously: the bot opens one connection
+# per channel (first = "FBI-BOT", extras = "FBI-BOT-2", "FBI-BOT-3", ...).
+# Each records its own channel to 128k OGG when 2+ real users are in it.
+# Use --list-channels to discover exact names.
+channels = Lobby, Ops Room
+
+# Optional: explicit idle channel (defaults to first entry above)
+# channel_idle = Lobby
+
+# Legacy single-channel form (used only if 'channels' is empty):
+# channel = Lobby
+
+# Optional TLS client cert (PEM paths, blank if none)
+# certfile =
+# keyfile =
+
+[recording]
+# Where finished *.ogg files land
+output_dir = ./recordings
+
+# Start recording when this many REAL users (bot excluded) share the bot's channel
+min_users = 2
+
+# Seconds to wait after dropping below min_users before finalising the file
+stop_delay = 10
+
+# How often to re-evaluate channel occupancy (seconds)
+poll_interval = 1.0
+
+# Output encoding: 128kbps OGG as requested
+bitrate = 128k
+
+# ogg_format = vorbis  -> OGG Vorbis (default, 128k)
+# ogg_format = opus    -> OGG Opus (smaller, also honours bitrate)
+ogg_format = vorbis
+
+# Discard clips shorter than this (seconds) to avoid join/leave spam files
+min_duration = 3
+
+# Auto-delete recordings older than this (days). 0 = keep forever.
+# Private / no-sharing setup: 7 days as agreed.
+retention_days = 7
+
+[general]
+# Comment shown on the bot user in Mumble clients
+comment = FBI-BOT | auto-records when 2+ users are present
+
+# Seconds to wait before reconnecting after a drop.
+# Bot retries the join every 30s forever; systemd RestartSec=30 is the backstop.
+reconnect_delay = 30
