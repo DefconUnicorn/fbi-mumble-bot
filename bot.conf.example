@@ -34,7 +34,9 @@ channels = Lobby, Ops Room
 # keyfile =
 
 [recording]
-# Where finished *.ogg files land
+# Where finished *.ogg files land.
+# Relative paths resolve from this .conf file's folder (not your shell CWD),
+# so ./recordings next to bot.conf just works from anywhere.
 output_dir = ./recordings
 
 # Start recording when this many REAL users (bot excluded) share the bot's channel

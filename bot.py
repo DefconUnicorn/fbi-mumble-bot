@@ -102,6 +102,14 @@ def load_config(path):
         for k in ("comment", "reconnect_delay"):
             if cp.has_option("general", k):
                 cfg[k] = cp.get("general", k)
+    # Anchor relative paths (output_dir, certfile, keyfile) to the config
+    # file's directory, not the shell's CWD — so `sudo -u mumblebot ...`
+    # works from anywhere (e.g. /home/bob) and the systemd unit and CLI agree.
+    base = os.path.dirname(os.path.abspath(path))
+    for k in ("output_dir", "certfile", "keyfile"):
+        v = (cfg.get(k, "") or "").strip()
+        if v and not os.path.isabs(v):
+            cfg[k] = os.path.normpath(os.path.join(base, v))
     # also accept flat file without sections? be lenient:
     return cfg
 
