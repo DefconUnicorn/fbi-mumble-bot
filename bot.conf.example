@@ -16,11 +16,26 @@ password =
 # Channel access tokens, comma-separated (blank if none)
 # tokens = secret1, secret2
 
-# Channels to record. Comma- or newline-separated, exact names.
-# ONE SERVICE covers them ALL simultaneously: the bot opens one connection
-# per channel (first = "FBI-BOT", extras = "FBI-BOT-2", "FBI-BOT-3", ...).
-# Each records its own channel to 128k OGG when 2+ real users are in it.
-# Use --list-channels to discover exact names.
+# How the bot picks channels:
+#   mode = fixed -> sit in 'channels' below (one connection each, all recorded
+#                   simultaneously: FBI-BOT, FBI-BOT-2, ...)
+#   mode = roam  -> one bot follows the single busiest channel with min_users+
+#   mode = swarm -> join ALL channels with min_users+ at once (a scout plus
+#                   one worker per busy channel: FBI-BOT, FBI-BOT-2, ...).
+#                   This is the "record everywhere active" mode.
+mode = fixed
+
+# Channels the roam/swarm modes never auto-join (comma-separated, e.g. AFK).
+# Matched case-insensitively against exact channel names.
+# ignore_channels = AFK
+
+# Swarm retires a worker after its channel stays below min_users this long
+# (seconds). The recording itself still closes after stop_delay first.
+# swarm_idle_timeout = 60
+
+# Channels to record (fixed mode). Comma- or newline-separated, exact names.
+# In roam mode the first entry is just the idle fallback between recordings
+# (or set channel_idle explicitly); leave empty to stay wherever put.
 channels = Lobby, Ops Room
 
 # Optional: explicit idle channel (defaults to first entry above)

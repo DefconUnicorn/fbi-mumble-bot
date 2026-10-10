@@ -69,7 +69,9 @@ server = mumble.example.com
 port = 64738
 username = FBI-BOT
 password =
-channels = Lobby, Ops Room     # idles in first, follows activity
+mode = fixed                # fixed = sit in channels; roam = follow busiest; swarm = cover all busy
+channels = Lobby, Ops Room  # fixed: all recorded at once; roam: first = idle fallback; swarm: unused
+ignore_channels = AFK       # roam/swarm: never auto-join these
 
 [recording]
 output_dir = ./recordings
@@ -86,10 +88,18 @@ must otherwise match; nested channels can be given as `Root/Sub`).
 
 ## How it works
 
-1. One service, N channels: `channels = Lobby, Ops Room` opens one TCP
-   connection per channel in threads (first as `FBI-BOT`, extras as
-   `FBI-BOT-2`, … — required since one Mumble client can sit in only one
-   channel). No second service needed. Single channel = single connection.
+1. Three modes, one service. **Fixed** (default): `channels = Lobby, Ops Room`
+   opens one TCP connection per channel in threads (first as `FBI-BOT`,
+   extras as `FBI-BOT-2`, … — required since one Mumble client can sit in
+   only one channel). **Roam** (`mode = roam`): a single `FBI-BOT` scans the
+   whole server and auto-joins whichever non-ignored channel has `min_users`+
+   real occupants, moving as activity shifts (strictly-better-only, so no
+   flapping on ties; failed joins are skipped for 5 min). **Swarm**
+   (`mode = swarm`): joins **all** channels with `min_users`+ at once — a
+   non-recording `FBI-BOT-scout` watches the server and starts one worker
+   (`FBI-BOT`, `FBI-BOT-2`, …) per busy channel, retiring each after
+   `swarm_idle_timeout` (60s) of quiet. Workers never count each other as
+   occupants.
 2. Each worker sits in its own channel and polls occupancy every
    `poll_interval` seconds.
 3. When its channel reaches `min_users` (2 real users, bot excluded), it

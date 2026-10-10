@@ -66,6 +66,9 @@ DEFAULTS = {
     "channels": "",          # comma- or newline-separated list, e.g. "Lobby, Ops / Room 1"
     "channel": "",           # legacy single-channel alias
     "channel_idle": "",      # where to wait when nothing is active (defaults to channels[0])
+    "mode": "fixed",         # fixed = sit in 'channels'; roam = follow busiest; swarm = cover all busy
+    "ignore_channels": "",   # roam/swarm never auto-join these (e.g. "AFK")
+    "swarm_idle_timeout": "60",  # swarm retires a worker this long after its channel goes quiet
     "output_dir": "./recordings",
     "min_users": "2",        # start recording when >= this many REAL users (bot excluded)
     "stop_delay": "10",      # seconds to wait after dropping below min_users before stopping
@@ -90,7 +93,8 @@ def load_config(path):
     cfg = dict(DEFAULTS)
     if cp.has_section("mumble"):
         for k in ("server", "port", "username", "password", "tokens",
-                  "channels", "channel", "channel_idle", "certfile", "keyfile"):
+                  "channels", "channel", "channel_idle", "certfile", "keyfile",
+                  "mode", "ignore_channels", "swarm_idle_timeout"):
             if cp.has_option("mumble", k):
                 cfg[k] = cp.get("mumble", k)
     if cp.has_section("recording"):
@@ -321,9 +325,14 @@ def purge_old_recordings(output_dir, retention_days):
 # ------------------------------------------------------------ bot
 
 class FbiBot:
-    def __init__(self, cfg, username=None, channels=None, label=None):
+    def __init__(self, cfg, username=None, channels=None, label=None,
+                 record_enabled=True, peers=None):
         self.cfg = cfg
         self.label = label or (username or cfg.get("username", "FBI-BOT"))
+        self.record_enabled = record_enabled
+        # peers = (set_of_bot_sessions, lock) shared by a swarm so workers
+        # never count each other as "real users".
+        self._peers, self._peer_lock = peers if peers else (set(), threading.Lock())
         if username is not None:
             # per-worker copy so parallel channels get unique visible names
             cfg = dict(cfg)
@@ -341,6 +350,13 @@ class FbiBot:
         self.poll = float(cfg.get("poll_interval", 1.0))
         self.reconnect_delay = float(cfg.get("reconnect_delay", 30))
         self.retention_days = cfg.get("retention_days", "7")
+        self.mode = (cfg.get("mode", "fixed") or "fixed").strip().lower()
+        self._ignore_names = set(
+            p.strip().lower()
+            for p in re.split(r"[,\n]+", cfg.get("ignore_channels", ""))
+            if p.strip()
+        )
+        self._move_blacklist = {}  # channel_id -> unix time; skips failed joins briefly
         self.output_dir = os.path.abspath(cfg.get("output_dir", "./recordings"))
         self._last_purge = 0.0
         self._purge_interval = 3600.0  # re-scan at most hourly
@@ -404,6 +420,13 @@ class FbiBot:
         try:
             me = self.mumble.users.myself
             self._my_session = me.get("session") if isinstance(me, dict) else getattr(me, "session", None)
+        except Exception:  # noqa: BLE001
+            pass
+        # register so swarm peers never count us as a "real user"
+        try:
+            if self._my_session is not None:
+                with self._peer_lock:
+                    self._peers.add(self._my_session)
         except Exception:  # noqa: BLE001
             pass
         # set comment so clients see what the bot does
@@ -513,14 +536,18 @@ class FbiBot:
 
     def _real_user_count(self, channel_id):
         users = self._users_in_channel(channel_id)
+        try:
+            peers = set(self._peers) if self._peers else set()
+        except Exception:  # noqa: BLE001
+            peers = set()
         n = 0
         for u in users:
             try:
                 sess = u.get("session") if isinstance(u, dict) else getattr(u, "session", None)
             except Exception:  # noqa: BLE001
                 sess = None
-            if sess == self._my_session:
-                continue
+            if sess == self._my_session or sess in peers:
+                continue  # skip self and fellow swarm workers
             n += 1
         return n
 
@@ -612,9 +639,9 @@ class FbiBot:
         except Exception:  # noqa: BLE001
             pass
 
-        log.warning("[%s] Bot ready. Watching: %s | min_users=%d stop_delay=%.0fs",
-                    self.label,
-                    self.watch_channels or ["(current channel only)"],
+        log.warning("[%s] Bot ready (mode=%s). Watching: %s | min_users=%d stop_delay=%.0fs",
+                    self.label, self.mode,
+                    self.watch_channels or ["(whole server)" if self.mode == "roam" else "(current channel only)"],
                     self.min_users, self.stop_delay)
         log.warning("Retention: %s days in %s (0=keep forever)",
                     self.retention_days, self.output_dir)
@@ -689,7 +716,12 @@ class FbiBot:
                 my_name = best_name
                 here = best_n
 
-        if here >= self.min_users:
+        # Roam mode: scan the whole server and auto-join the busiest channel
+        # with min_users+ real occupants (skips ignore_channels).
+        if self.mode == "roam":
+            my_cid, my_name, here = self._tick_roam(my_cid, my_name, here)
+
+        if self.record_enabled and here >= self.min_users:
             self._below_since = None
             if not self.recorder.active:
                 self.recorder.start(my_name)
@@ -701,7 +733,7 @@ class FbiBot:
                     self.recorder.stop()
                     self._below_since = None
                     # drift back to idle channel if configured
-                    if self.idle_channel and self.watch_channels:
+                    if self.idle_channel:
                         cur = self._my_channel_obj()
                         cur_name = self._channel_name_of(cur) if cur else ""
                         if cur_name != self.idle_channel:
@@ -713,6 +745,61 @@ class FbiBot:
                                 except Exception:  # noqa: BLE001
                                     pass
 
+    def _is_ignored(self, name):
+        return isinstance(name, str) and name.strip().lower() in self._ignore_names
+
+    def _try_move(self, ch, name, n):
+        """move_in with a short blacklist on failure (e.g. locked channel)."""
+        try:
+            ch.move_in()
+            log.warning("[%s] Auto-join '%s' (%d users)", self.label, name, n)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.error("[%s] move to '%s' failed: %s", self.label, name, e)
+            try:
+                cid = self._channel_id_of(ch)
+                if cid is not None:
+                    self._move_blacklist[cid] = time.time() + 300
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
+    def _tick_roam(self, my_cid, my_name, here):
+        """Find the busiest non-ignored channel and join it if worthwhile.
+        Returns possibly-updated (my_cid, my_name, here)."""
+        best_ch, best_name, best_n = None, "", -1
+        try:
+            for cid, ch in dict(self.mumble.channels).items():
+                try:
+                    nm = ch.get_property("name") if hasattr(ch, "get_property") else ch["name"]
+                except Exception:  # noqa: BLE001
+                    continue
+                if not isinstance(nm, str):
+                    continue
+                nm = nm.strip()
+                if self._is_ignored(nm):
+                    continue
+                if cid in self._move_blacklist and time.time() < self._move_blacklist[cid]:
+                    continue
+                n = self._real_user_count(cid)
+                if n > best_n:
+                    best_n = n
+                    best_ch, best_name = ch, nm
+        except Exception:  # noqa: BLE001
+            pass
+        if best_ch is None or best_n < self.min_users:
+            return my_cid, my_name, here  # nothing worth joining
+        best_cid = self._channel_id_of(best_ch)
+        if best_cid == my_cid:
+            return my_cid, my_name, here  # already there
+        # Switch only if strictly busier (no flapping on ties), unless we're
+        # sitting in an ignored channel (e.g. AFK) — then leave if anything
+        # better qualifies.
+        if best_n > here or self._is_ignored(my_name):
+            if self._try_move(best_ch, best_name, best_n):
+                return best_cid, best_name, best_n
+        return my_cid, my_name, here
+
     def _shutdown_session(self):
         try:
             if self.recorder.active:
@@ -720,10 +807,161 @@ class FbiBot:
         except Exception:  # noqa: BLE001
             pass
         try:
+            # free our session id so peers stop excluding it (ids get reused)
+            if self._my_session is not None:
+                with self._peer_lock:
+                    self._peers.discard(self._my_session)
+        except Exception:  # noqa: BLE001
+            pass
+        self._my_session = None
+        try:
             if self.mumble is not None:
                 self.mumble.stop()
         except Exception:  # noqa: BLE001
             pass
+
+    def stop(self):
+        self._stop.set()
+
+
+# ------------------------------------------------------------ swarm
+# mode=swarm: join ALL channels with min_users+ occupants simultaneously.
+# One Mumble connection sits in one channel, so a lightweight scout watches
+# the server and the supervisor runs one FbiBot worker per busy channel,
+# retiring workers whose channel stays quiet past swarm_idle_timeout.
+
+class Swarm:
+    def __init__(self, cfg, base_user=None, worker_factory=None, snapshot_fn=None):
+        self.cfg = dict(cfg)
+        self.base_user = (base_user or cfg.get("username", "FBI-BOT") or "FBI-BOT").strip()
+        self.min_users = int(cfg.get("min_users", 2))
+        self.poll = float(cfg.get("poll_interval", 1.0))
+        self.idle_timeout = float(cfg.get("swarm_idle_timeout", 60))
+        self._ignore_names = set(
+            p.strip().lower()
+            for p in re.split(r"[,\n]+", cfg.get("ignore_channels", ""))
+            if p.strip()
+        )
+        self.sessions = set()  # every bot connection's session id (scout + workers)
+        self.lock = threading.Lock()
+        self.workers = {}  # cid -> {worker, thread, username, name, last_active}
+        self.used_names = set()
+        self.scout = None
+        self._stop = threading.Event()
+        self._worker_factory = worker_factory or self._real_worker
+        self._snapshot_fn = snapshot_fn
+
+    # -- plumbing -----------------------------------------------------
+    def _real_worker(self, channel_name, username):
+        w = FbiBot(self.cfg, username=username, channels=[channel_name],
+                   label=f"{username}:{channel_name}",
+                   peers=(self.sessions, self.lock))
+        t = threading.Thread(target=w.run_forever, daemon=True,
+                             name=f"swarm-{username}")
+        return w, t
+
+    def _pick_username(self):
+        i = 0
+        while True:
+            nm = self.base_user if i == 0 else f"{self.base_user}-{i + 1}"
+            if nm not in self.used_names:
+                return nm
+            i += 1
+
+    def _snapshot(self):
+        """{cid: (name, real_count)} for every non-ignored channel."""
+        m = self.scout.mumble if self.scout is not None else None
+        if m is None:
+            return {}
+        out = {}
+        try:
+            for cid, ch in dict(m.channels).items():
+                try:
+                    nm = ch.get_property("name") if hasattr(ch, "get_property") else ch["name"]
+                except Exception:  # noqa: BLE001
+                    continue
+                if not isinstance(nm, str):
+                    continue
+                nm = nm.strip()
+                out[cid] = (nm, self.scout._real_user_count(cid))
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    # -- supervision --------------------------------------------------
+    def _tick(self):
+        snap = self._snapshot_fn() if self._snapshot_fn else self._snapshot()
+        now = time.time()
+        for cid, (nm, n) in snap.items():
+            if nm.lower() in self._ignore_names:
+                continue  # e.g. AFK lobby
+            if n < self.min_users:
+                continue
+            if cid in self.workers:
+                self.workers[cid]["last_active"] = now
+                continue
+            username = self._pick_username()
+            worker, thread = self._worker_factory(nm, username)
+            thread.start()
+            with self.lock:
+                self.used_names.add(username)
+            self.workers[cid] = {"worker": worker, "thread": thread,
+                                 "username": username, "name": nm,
+                                 "last_active": now}
+            log.warning("[swarm] covering '%s' (%d users) as %s", nm, n, username)
+        for cid in list(self.workers):
+            info = self.workers[cid]
+            n = snap.get(cid, (info["name"], 0))[1] if cid in snap else 0
+            if n >= self.min_users:
+                continue
+            if now - info["last_active"] >= self.idle_timeout:
+                log.warning("[swarm] retiring %s from '%s' (quiet %.0fs)",
+                            info["username"], info["name"], now - info["last_active"])
+                try:
+                    info["worker"].stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    info["thread"].join(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+                with self.lock:
+                    self.used_names.discard(info["username"])
+                del self.workers[cid]
+
+    def start(self):
+        self.scout = FbiBot(self.cfg, username=f"{self.base_user}-scout",
+                            channels=[],
+                            label=f"{self.base_user}-scout",
+                            record_enabled=False,
+                            peers=(self.sessions, self.lock))
+        with self.lock:
+            self.used_names.add(f"{self.base_user}-scout")
+        st = threading.Thread(target=self.scout.run_forever, daemon=True,
+                              name="swarm-scout")
+        st.start()
+        log.warning("[swarm] watching whole server (min_users=%d, idle_timeout=%.0fs, ignore=%s)",
+                    self.min_users, self.idle_timeout,
+                    sorted(self._ignore_names) or "none")
+        while not self._stop.is_set():
+            try:
+                self._tick()
+            except Exception as e:  # noqa: BLE001
+                log.error("[swarm] tick error: %s", e)
+            time.sleep(self.poll)
+        self.shutdown()
+
+    def shutdown(self):
+        for cid in list(self.workers):
+            try:
+                self.workers[cid]["worker"].stop()
+            except Exception:  # noqa: BLE001
+                pass
+        if self.scout is not None:
+            try:
+                self.scout.stop()
+            except Exception:  # noqa: BLE001
+                pass
 
     def stop(self):
         self._stop.set()
@@ -751,6 +989,7 @@ def main():
     if args.list_channels:
         bot = FbiBot(cfg)
         m = bot._create_mumble()
+        bot.mumble = m  # so the CONNECTED callback (_on_connected) can use it
         m.start()
         try:
             m.is_ready(timeout=30)
@@ -773,10 +1012,27 @@ def main():
 
     # sanity: channel config present?
     configured = parse_channel_list(cfg)
-    if not configured:
+    mode = (cfg.get("mode", "fixed") or "fixed").strip().lower()
+    roam = mode == "roam"
+    swarm_mode = mode == "swarm"
+    if not configured and not roam and not swarm_mode:
         print("WARNING: no channels configured - bot will record its starting channel only.", file=sys.stderr)
 
     base_user = (cfg.get("username", "FBI-BOT") or "FBI-BOT").strip()
+
+    if swarm_mode:
+        # Swarm mode: scout + one worker per channel with min_users+ occupants.
+        sw = Swarm(cfg, base_user)
+
+        def _sig_sw(signum, _frame):
+            log.warning("Signal %s - shutting down swarm...", signum)
+            sw.stop()
+
+        signal.signal(signal.SIGINT, _sig_sw)
+        signal.signal(signal.SIGTERM, _sig_sw)
+        log.warning("FBI-BOT swarm starting (config: %s)", args.config)
+        sw.start()
+        return
 
     def _worker_name(i):
         # First worker keeps the exact name ("FBI-BOT" visible as requested);
@@ -784,7 +1040,12 @@ def main():
         return base_user if i == 0 else f"{base_user}-{i + 1}"
 
     bots = []
-    if len(configured) <= 1:
+    if roam:
+        # Roam mode: one worker scans the whole server and auto-joins the
+        # busiest min_users+ channel. 'channels'/'channel_idle' are optional:
+        # if set, the first entry is the idle fallback between recordings.
+        bots = [FbiBot(cfg)]
+    elif len(configured) <= 1:
         bots = [FbiBot(cfg)]
     else:
         # One connection per channel, all in a single service process.
