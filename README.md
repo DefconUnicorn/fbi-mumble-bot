@@ -11,7 +11,9 @@ records to **128 kbps OGG** whenever **2 or more real users** share its channe
 | `bot.conf.example` | Copy to `bot.conf`, fill in server details |
 | `requirements.txt` | Pinned Python deps |
 | `install.sh` | Ubuntu installer (deps + venv + systemd) |
-| `fbi-bot.service` | systemd unit |
+| `fbi-bot.service` | systemd unit (bare-metal Ubuntu) |
+| `Dockerfile` | Container image (TrueNAS / Docker) |
+| `docker-compose.yml` | TrueNAS Custom App / `docker compose up` |
 
 ## Quick start (Ubuntu 22.04 / 24.04)
 
@@ -28,6 +30,27 @@ sudo -u mumblebot /opt/fbi-mumble-bot/venv/bin/python \
 sudo systemctl start fbi-bot
 journalctl -u fbi-bot -f
 ```
+
+## TrueNAS SCALE (Custom App via compose)
+
+No systemd needed — the container handles the 30s boot delay + 30s rejoin
+cadence internally.
+
+```bash
+# on TrueNAS (dataset e.g. /mnt/tank/apps/fbi-mumble-bot):
+git clone https://github.com/DefconUnicorn/fbi-mumble-bot .
+cp bot.conf.example bot.conf && nano bot.conf
+# in bot.conf set: server, channels, and output_dir = /app/recordings
+mkdir -p recordings
+docker compose up -d --build
+docker logs -f fbi-bot
+```
+
+Or via UI: **Apps > Discover Apps > (⋮) Install via YAML**, paste
+`docker-compose.yml`, adjust the two host paths (`./bot.conf`,
+`./recordings`) to your dataset paths, Install. Runs as `568:568` by
+default (`PUID`/`PGID` env override); recordings persist in the mounted
+`recordings` dataset. `TZ` defaults to `Europe/London`.
 
 Recordings land in `output_dir` (default `./recordings`) as:
 

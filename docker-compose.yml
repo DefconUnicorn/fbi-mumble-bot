@@ -1,0 +1,32 @@
+# FBI-BOT for TrueNAS SCALE (Custom App / Docker Compose) and plain Docker.
+#
+# TrueNAS SCALE 24.10+ (Electric Eel and later):
+#   1. Copy this folder to a dataset, e.g. /mnt/tank/apps/fbi-mumble-bot
+#   2. cp bot.conf.example bot.conf && nano bot.conf   # server, channels, output_dir
+#      NOTE: output_dir must be /app/recordings (the mount below), or your
+#      own inside-container path that you mount.
+#   3. Apps > Discover Apps > (⋮) Install via YAML > paste this file >
+#      adjust the host paths > Install.
+#   -or- from the TrueNAS shell in that dataset:  docker compose up -d
+#
+# Plain Linux with Docker: same two steps, then `docker compose up -d --build`.
+
+services:
+  fbi-bot:
+    build: .
+    # After first build you can pin this; TrueNAS will use the built image.
+    image: fbi-mumble-bot:latest
+    container_name: fbi-bot
+    restart: unless-stopped
+    # TrueNAS Apps run as 568:568 by default; override with PUID/PGID env.
+    user: "${PUID:-568}:${PGID:-568}"
+    environment:
+      - TZ=${TZ:-Europe/London}
+    volumes:
+      # Config (read-only) + recordings (persistent). Adjust host sides to
+      # your dataset, e.g. /mnt/tank/apps/fbi-mumble-bot/bot.conf
+      - ./bot.conf:/app/bot.conf:ro
+      - ./recordings:/app/recordings
+    # 30s boot-only delay + 30s rejoin cadence are handled inside the bot
+    # (systemd unit is NOT used in the container).
+    command: ["python", "bot.py", "-c", "/app/bot.conf"]
