@@ -633,6 +633,11 @@ class FbiBot:
         self.mumble = self._create_mumble()
         self.mumble.start()
         self._wait_ready(timeout=30)
+        # pymumble releases its ready-lock even when the server rejects the
+        # connection (its thread then dies) — so verify we are really alive
+        # before declaring readiness, or we'd idle on a dead connection.
+        if not self._is_alive():
+            raise ConnectionError("mumble thread died during connect")
         # refresh own session id
         try:
             me = self.mumble.users.myself
@@ -657,6 +662,9 @@ class FbiBot:
                 try:
                     if not getattr(self.mumble, "connected", True):
                         raise ConnectionError("mumble.connected is False")
+                    if not self._is_alive():
+                        # internet drop / server kick: pymumble's thread exits
+                        raise ConnectionError("mumble thread died")
                     self._tick()
                 except ConnectionError:
                     raise
@@ -665,6 +673,12 @@ class FbiBot:
                 time.sleep(self.poll)
         finally:
             self._shutdown_session()
+
+    def _is_alive(self):
+        try:
+            return bool(self.mumble is not None and self.mumble.is_alive())
+        except Exception:  # noqa: BLE001
+            return False
 
     def _wait_ready(self, timeout=30):
         """Wait for connection with a hard timeout so retries stay on 30s cadence,
