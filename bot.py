@@ -134,79 +134,122 @@ def safe_filename(s):
 # ------------------------------------------------------------ PCM mixer
 # Mixes interleaved per-user Opus-decoded PCM (48kHz mono s16le) into one
 # timeline in real time. Overlapping speech is summed + clipped.
+#
+# The timeline spills to a temp raw-PCM file instead of RAM: a Python list
+# of ints costs ~36 bytes/sample (~100MB/hour), which OOM-killed long
+# sessions. File-backed mixing keeps RAM flat no matter the duration.
 
-class RealtimeMixer:
-    def __init__(self):
+class FileMixer:
+    def __init__(self, tmpdir):
+        self.tmpdir = os.path.abspath(tmpdir)
         self.lock = threading.Lock()
-        self.samples = []  # list of ints, mono s16
+        self.fh = None
+        self.path = None
+        self.length = 0  # samples on the timeline
         self.t0 = None
 
     def start(self):
         with self.lock:
-            self.samples = []
+            self._close(unlink=True)
+            os.makedirs(self.tmpdir, exist_ok=True)
+            fd, self.path = tempfile.mkstemp(prefix="rec-", suffix=".part",
+                                            dir=self.tmpdir)
+            self.fh = os.fdopen(fd, "w+b", buffering=0)  # unbuffered: R/W safe
+            self.length = 0
             self.t0 = time.time()
 
     def add_pcm(self, pcm_bytes):
-        if not pcm_bytes:
+        if not pcm_bytes or self.fh is None:
             return
         n = len(pcm_bytes) // 2
-        fmt = "<" + "h" * n
         try:
-            incoming = struct.unpack(fmt, pcm_bytes[: n * 2])
+            incoming = struct.unpack("<" + "h" * n, pcm_bytes[: n * 2])
         except struct.error:
             return
         now = time.time()
         with self.lock:
+            if self.fh is None:
+                return
             if self.t0 is None:
                 self.t0 = now
-            expected_pos = int((now - self.t0) * SAMPLE_RATE)
-            offset = expected_pos - n
+            offset = int((now - self.t0) * SAMPLE_RATE) - n
             if offset < 0:
-                # Session just started (expected_pos < chunk len): mix at 0
-                # and run slightly ahead of wall-clock; later chunks catch up.
+                # Session just started: mix at 0, run slightly ahead of
+                # wall-clock; later chunks catch up.
                 offset = 0
-            # pad silence gap
-            if len(self.samples) < offset:
-                self.samples.extend([0] * (offset - len(self.samples)))
-            # ensure capacity
-            need = offset + len(incoming) - len(self.samples)
-            if need > 0:
-                self.samples.extend([0] * need)
-            # sum + clip
-            s = self.samples
-            for i, v in enumerate(incoming):
-                mixed = s[offset + i] + v
-                if mixed > 32767:
-                    mixed = 32767
-                elif mixed < -32768:
-                    mixed = -32768
-                s[offset + i] = mixed
+            if offset > self.length:
+                # silence gap: pad with zeros
+                self.fh.seek(self.length * 2)
+                self.fh.write(b"\x00" * ((offset - self.length) * 2))
+                self.length = offset
+            overlap = min(n, self.length - offset)
+            if overlap > 0:
+                self.fh.seek(offset * 2)
+                old = struct.unpack("<" + "h" * overlap,
+                                    self.fh.read(overlap * 2))
+                mixed = bytearray((overlap) * 2)
+                struct.pack_into("<" + "h" * overlap, mixed, 0,
+                                 *(min(32767, max(-32768, a + b))
+                                   for a, b in zip(old, incoming[:overlap])))
+                self.fh.seek(offset * 2)
+                self.fh.write(mixed)
+            tail = incoming[overlap:]
+            if tail:
+                self.fh.seek(self.length * 2)
+                self.fh.write(struct.pack("<" + "h" * len(tail), *tail))
+                self.length += len(tail)
 
     def duration(self):
         with self.lock:
-            return len(self.samples) / float(SAMPLE_RATE)
+            return self.length / float(SAMPLE_RATE)
 
-    def to_bytes(self):
-        with self.lock:
-            return struct.pack("<" + "h" * len(self.samples), *self.samples) if self.samples else b""
+    def _close(self, unlink):
+        try:
+            if self.fh is not None:
+                self.fh.close()
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self.fh = None
+        if unlink and self.path:
+            try:
+                os.remove(self.path)
+            except OSError:  # noqa: BLE001
+                pass
+            self.path = None
 
-    def reset(self):
+    def discard(self):
         with self.lock:
-            self.samples = []
+            self._close(unlink=True)
+            self.length = 0
             self.t0 = None
+
+    def take_file(self):
+        """Hand over the temp raw-PCM path (caller deletes it when done)."""
+        with self.lock:
+            try:
+                if self.fh is not None:
+                    self.fh.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            path = self.path
+            self.fh, self.path = None, None
+            self.length = 0
+            self.t0 = None
+            return path
 
 
 # ------------------------------------------------------------ recorder
 
 class SessionRecorder:
-    """Buffers mixed PCM during a session, encodes to 128k OGG on stop."""
+    """Mixes a session to a temp raw file, encodes to 128k OGG on stop."""
 
     def __init__(self, output_dir, bitrate="128k", ogg_format="vorbis", min_duration=3):
         self.output_dir = os.path.abspath(output_dir)
         self.bitrate = bitrate
         self.ogg_format = ogg_format.lower().strip()
         self.min_duration = float(min_duration)
-        self.mixer = RealtimeMixer()
+        self.mixer = FileMixer(self.output_dir)
         self.active = False
         self.channel_name = ""
         self.start_dt = None
@@ -223,6 +266,13 @@ class SessionRecorder:
         if self.active:
             self.mixer.add_pcm(pcm_bytes)
 
+    def _unlink_quietly(self, path):
+        try:
+            if path:
+                os.remove(path)
+        except OSError:  # noqa: BLE001
+            pass
+
     def stop(self):
         """Encode and return output path, or None if discarded."""
         if not self.active:
@@ -232,11 +282,10 @@ class SessionRecorder:
         if dur < self.min_duration:
             log.warning("REC DISCARD channel='%s' duration=%.1fs (< min %.0fs)",
                         self.channel_name, dur, self.min_duration)
-            self.mixer.reset()
+            self.mixer.discard()
             return None
-        pcm = self.mixer.to_bytes()
-        self.mixer.reset()
-        if not pcm:
+        raw_path = self.mixer.take_file()
+        if not raw_path:
             return None
         stamp = self.start_dt.strftime("%Y-%m-%d_%H-%M-%S") if self.start_dt else datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         base = f"{stamp}_{safe_filename(self.channel_name)}"
@@ -246,24 +295,35 @@ class SessionRecorder:
         while os.path.exists(out_path):
             out_path = os.path.join(self.output_dir, f"{base}_{i}.ogg")
             i += 1
-        ok = self._encode_ogg(pcm, out_path)
+        try:
+            ok = self._encode_ogg(raw_path, out_path)
+        finally:
+            self._unlink_quietly(raw_path)
         if ok:
             log.warning("REC STOP  channel='%s' duration=%.1fs -> %s", self.channel_name, dur, out_path)
             return out_path
         log.error("Encoding failed, wrote nothing")
         return None
 
-    def _encode_ogg(self, pcm_bytes, out_path):
+    def _encode_ogg(self, raw_path, out_path):
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
             # fallback: plain wav so nothing is lost
             wav_path = os.path.splitext(out_path)[0] + ".wav"
             import wave
-            with wave.open(wav_path, "wb") as w:
-                w.setnchannels(CHANNELS)
-                w.setsampwidth(SAMPLE_WIDTH)
-                w.setframerate(SAMPLE_RATE)
-                w.writeframes(pcm_bytes)
+            try:
+                with open(raw_path, "rb") as rf, wave.open(wav_path, "wb") as w:
+                    w.setnchannels(CHANNELS)
+                    w.setsampwidth(SAMPLE_WIDTH)
+                    w.setframerate(SAMPLE_RATE)
+                    while True:
+                        blk = rf.read(48000 * 2 * 10)  # ~10s streaming copy
+                        if not blk:
+                            break
+                        w.writeframes(blk)
+            except OSError as e:  # noqa: BLE001
+                log.error("WAV fallback failed: %s", e)
+                return False
             try:
                 os.chmod(wav_path, 0o666)  # world read/write per config policy
             except Exception:  # noqa: BLE001
@@ -274,14 +334,16 @@ class SessionRecorder:
             codec = "libopus"
         else:
             codec = "libvorbis"  # OGG Vorbis @ 128k
+        # raw PCM comes from the mixer's temp file: ffmpeg streams it from
+        # disk, so even multi-hour sessions encode with flat RAM.
         cmd = [ffmpeg, "-y", "-v", "error",
                "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
-               "-i", "pipe:0",
+               "-i", raw_path,
                "-c:a", codec, "-b:a", self.bitrate,
                out_path]
         try:
-            p = subprocess.run(cmd, input=pcm_bytes, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, timeout=300)
+            p = subprocess.run(cmd, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=3600)
             if p.returncode != 0 or not os.path.isfile(out_path):
                 log.error("ffmpeg failed: %s", p.stderr.decode(errors='replace')[:500])
                 return False
@@ -806,6 +868,9 @@ class FbiBot:
         """Find the busiest non-ignored channel and join it if worthwhile.
         Returns possibly-updated (my_cid, my_name, here)."""
         best_ch, best_name, best_n = None, "", -1
+        now = time.time()
+        for k in [k for k, v in self._move_blacklist.items() if v < now]:
+            del self._move_blacklist[k]  # don't let failed joins pile up forever
         try:
             for cid, ch in dict(self.mumble.channels).items():
                 try:
@@ -817,7 +882,7 @@ class FbiBot:
                 nm = nm.strip()
                 if self._is_ignored(nm):
                     continue
-                if cid in self._move_blacklist and time.time() < self._move_blacklist[cid]:
+                if cid in self._move_blacklist and now < self._move_blacklist[cid]:
                     continue
                 n = self._real_user_count(cid)
                 if n > best_n:

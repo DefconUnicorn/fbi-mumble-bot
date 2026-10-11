@@ -16,6 +16,9 @@ ExecStartPre=/bin/bash -c 'if [ $(cut -d. -f1 /proc/uptime) -lt 180 ]; then slee
 ExecStart=/opt/fbi-mumble-bot/venv/bin/python /opt/fbi-mumble-bot/bot.py -c /opt/fbi-mumble-bot/bot.conf
 Restart=always
 RestartSec=30
+# Backstop: normal use stays well under 200MB (audio spills to disk, not RAM).
+# If memory ever balloons again, restart cleanly instead of troubling the host.
+MemoryMax=1G
 # Keep journal tidy; bot logs REC START/STOP at warning level
 StandardOutput=journal
 StandardError=journal
