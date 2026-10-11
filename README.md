@@ -84,7 +84,8 @@ must otherwise match; nested channels can be given as `Root/Sub`).
    mixes all same-channel Opus-decoded PCM (48 kHz mono s16le) on a
    real-time wall-clock timeline (overlapping speech is summed + clipped).
 4. When occupancy drops, it waits `stop_delay` seconds, then pipes raw PCM
-   through `ffmpeg -c:a libvorbis -b:a 128k` to OGG (`chmod 600`). If
+   through `ffmpeg -c:a libvorbis -b:a 128k` to OGG (`chmod 666`, world
+   read/write). If
    `ffmpeg` is missing it saves a WAV fallback and logs an error.
 5. On disconnect/failure each worker stops cleanly and retries its join every
    `reconnect_delay` (30s default) forever; systemd `RestartSec=30` is the

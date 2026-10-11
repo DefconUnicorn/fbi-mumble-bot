@@ -265,7 +265,7 @@ class SessionRecorder:
                 w.setframerate(SAMPLE_RATE)
                 w.writeframes(pcm_bytes)
             try:
-                os.chmod(wav_path, 0o600)
+                os.chmod(wav_path, 0o666)  # world read/write per config policy
             except Exception:  # noqa: BLE001
                 pass
             log.error("ffmpeg not found - saved WAV fallback: %s (install ffmpeg for OGG)", wav_path)
@@ -286,7 +286,7 @@ class SessionRecorder:
                 log.error("ffmpeg failed: %s", p.stderr.decode(errors='replace')[:500])
                 return False
             try:
-                os.chmod(out_path, 0o600)
+                os.chmod(out_path, 0o666)  # world read/write per config policy
             except Exception:  # noqa: BLE001
                 pass
             return True
