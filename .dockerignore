@@ -1,9 +1,0 @@
-.git/
-__pycache__/
-*.pyc
-venv/
-.env
-bot.conf
-recordings/
-*.ogg
-*.wav

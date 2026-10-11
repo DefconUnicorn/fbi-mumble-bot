@@ -11,9 +11,7 @@ records to **128 kbps OGG** whenever **2 or more real users** share its channe
 | `bot.conf.example` | Copy to `bot.conf`, fill in server details |
 | `requirements.txt` | Pinned Python deps |
 | `install.sh` | Ubuntu installer (deps + venv + systemd) |
-| `fbi-bot.service` | systemd unit (bare-metal Ubuntu) |
-| `Dockerfile` | Container image (TrueNAS / Docker) |
-| `docker-compose.yml` | TrueNAS Custom App / `docker compose up` |
+| `fbi-bot.service` | systemd unit |
 
 ## Quick start (Ubuntu 22.04 / 24.04)
 
@@ -33,29 +31,6 @@ sudo -u mumblebot /opt/fbi-mumble-bot/venv/bin/python \
 sudo systemctl start fbi-bot
 journalctl -u fbi-bot -f
 ```
-
-## TrueNAS SCALE (Custom App via YAML)
-
-TrueNAS "Install via YAML" cannot `build:` images, so the image is published
-to GHCR on every GitHub Release (see `.github/workflows/docker-publish.yml`).
-
-```bash
-# on TrueNAS shell:
-mkdir -p /mnt/tank/apps/fbi-mumble-bot/recordings
-chown -R 568:568 /mnt/tank/apps/fbi-mumble-bot/recordings
-# copy your bot.conf here (from bot.conf.example; keep output_dir = /app/recordings)
-# private image pull — authenticate once:
-docker login ghcr.io -u DefconUnicorn   # PAT with read:packages
-```
-
-Then **Apps > Discover Apps > (⋮) Install via YAML**, paste
-`truenas-compose.yaml` (adjust the two `/mnt/tank/...` host paths and the
-`:1.0.4` tag to your version), Install. Runs as `568:568`, `TZ` defaults to
-`Europe/London`.
-
-Alternative without GHCR: copy the whole project folder to a dataset and run
-`docker compose up -d --build` from the TrueNAS shell (uses `Dockerfile` +
-`docker-compose.yml` directly).
 
 Recordings land in `output_dir` (default `./recordings`) as:
 
